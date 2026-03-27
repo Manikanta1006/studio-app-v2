@@ -1,0 +1,141 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:../db/dental.db"
+}
+
+// Dental Case - Main case record
+model DentalCase {
+  id            String   @id @default(uuid())
+  caseNumber    String   @unique
+  patientName   String
+  status        String   @default("pending") // pending, in_review, approved, completed
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  versions      CaseVersion[]
+  comments      Comment[]
+  notes         Note[]
+  media         Media[]
+  jawModels     JawModel[]
+  
+  @@map("dental_cases")
+}
+
+// Case Version - Track different versions of a case
+model CaseVersion {
+  id            String     @id @default(uuid())
+  versionNumber String
+  createdAt     DateTime   @default(now())
+  status        String     @default("draft") // draft, submitted, approved
+  caseId        String
+  case          DentalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  steps         TreatmentStep[]
+  
+  @@map("case_versions")
+}
+
+// Treatment Step - Individual treatment steps
+model TreatmentStep {
+  id            String       @id @default(uuid())
+  stepNumber    Int
+  name          String?
+  description   String?
+  status        String       @default("pending") // pending, completed
+  versionId     String
+  version       CaseVersion  @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  
+  toothMovements ToothMovement[]
+  
+  @@map("treatment_steps")
+}
+
+// Tooth Movement - Track individual tooth movements per step
+model ToothMovement {
+  id            String         @id @default(uuid())
+  toothNumber   String         // Universal tooth numbering (1-32)
+  rotation      Float          @default(0)
+  translationX  Float          @default(0)
+  translationY  Float          @default(0)
+  translationZ  Float          @default(0)
+  stepId        String
+  step          TreatmentStep  @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  
+  @@map("tooth_movements")
+}
+
+// Jaw Model - 3D model data for upper/lower jaw
+model JawModel {
+  id            String     @id @default(uuid())
+  type          String     // "upper" or "lower"
+  originalPath  String     // Original STL file path
+  glbPath       String?    // Converted GLB file path
+  uploadedAt    DateTime   @default(now())
+  caseId        String
+  case          DentalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  teeth         Tooth[]
+  
+  @@map("jaw_models")
+}
+
+// Tooth - Individual tooth data
+model Tooth {
+  id            String    @id @default(uuid())
+  toothNumber   String    // Universal numbering (1-32)
+  name          String    // Common name (e.g., "Upper Right Central Incisor")
+  positionX     Float     @default(0)
+  positionY     Float     @default(0)
+  positionZ     Float     @default(0)
+  rotation      Float     @default(0)
+  jawModelId    String
+  jawModel      JawModel  @relation(fields: [jawModelId], references: [id], onDelete: Cascade)
+  
+  @@map("teeth")
+}
+
+// Comment - Communication between doctor and technician
+model Comment {
+  id          String     @id @default(uuid())
+  author      String
+  authorRole  String     // "doctor", "technician", "admin"
+  content     String
+  createdAt   DateTime   @default(now())
+  caseId      String
+  case        DentalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@map("comments")
+}
+
+// Note - Clinical notes
+model Note {
+  id          String     @id @default(uuid())
+  title       String
+  content     String
+  createdAt   DateTime   @default(now())
+  caseId      String
+  case        DentalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@map("notes")
+}
+
+// Media - Images, videos, documents
+model Media {
+  id          String     @id @default(uuid())
+  filename    String
+  filepath    String
+  filetype    String     // "image", "video", "document"
+  createdAt   DateTime   @default(now())
+  caseId      String
+  case        DentalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@map("media")
+}
