@@ -30,6 +30,32 @@ const upload = multer({
   },
 })
 
+router.get('/', async (request, response) => {
+  try {
+    const caseId = String(request.query.caseId ?? '')
+
+    if (!caseId) {
+      response.status(400).json({ success: false, error: 'caseId is required' })
+      return
+    }
+
+    const models = await JawModel.find({ caseId }).sort({ uploadedAt: -1 })
+
+    const files = models.map((model) => ({
+      id: String(model._id),
+      name: model.originalPath.split('/').pop() || model.originalPath.split('\\').pop() || 'unknown',
+      type: model.type,
+      glbPath: model.glbPath,
+      uploadedAt: model.uploadedAt,
+    }))
+
+    response.json({ success: true, data: files })
+  } catch (error) {
+    console.error('Error fetching uploaded files:', error)
+    response.status(500).json({ success: false, error: 'Failed to fetch uploaded files' })
+  }
+})
+
 router.post('/', upload.single('file'), async (request, response) => {
   try {
     if (!request.file) {

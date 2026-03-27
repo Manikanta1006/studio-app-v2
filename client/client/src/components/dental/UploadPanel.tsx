@@ -1,11 +1,12 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Upload, X, File, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
+import { useDentalStore } from '@/store/dental-store'
 
 interface UploadedFile {
   id: string
@@ -15,6 +16,7 @@ interface UploadedFile {
   status: 'pending' | 'uploading' | 'success' | 'error'
   progress: number
   error?: string
+  uploadedPath?: string
 }
 
 function inferFileType(fileName: string) {
@@ -35,6 +37,20 @@ export default function UploadPanel() {
   const [files, setFiles] = useState<UploadedFile[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
   const [showUpload, setShowUpload] = useState(false)
+  const { setUploadedModels } = useDentalStore()
+
+  useEffect(() => {
+    const successfulUploads = files
+      .filter((file) => file.status === 'success' && file.uploadedPath)
+      .map((file) => ({
+        id: file.id,
+        name: file.name,
+        type: file.type,
+        url: file.uploadedPath!,
+      }))
+
+    setUploadedModels(successfulUploads)
+  }, [files, setUploadedModels])
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`
@@ -66,7 +82,22 @@ export default function UploadPanel() {
 
       request.onload = () => {
         if (request.status >= 200 && request.status < 300) {
-          updateFile(fileRecord.id, (file) => ({ ...file, status: 'success', progress: 100 }))
+          let uploadedPath = ''
+
+          try {
+            const parsed = JSON.parse(request.responseText) as { data?: { glbPath?: string } }
+            uploadedPath = parsed.data?.glbPath ?? ''
+          } catch {
+            uploadedPath = ''
+          }
+
+          updateFile(fileRecord.id, (file) => ({
+            ...file,
+            status: 'success',
+            progress: 100,
+            uploadedPath,
+            error: undefined,
+          }))
           return
         }
 
@@ -159,7 +190,7 @@ export default function UploadPanel() {
   }, [])
 
   const triggerFileInput = useCallback(
-    (accept: string, type?: 'upper' | 'lower' | 'step', multiple = false) => {
+    (accept: string, type?: 'upper' | 'lower' | 'step', multiple = true) => {
       const input = document.createElement('input')
       input.type = 'file'
       input.accept = accept
@@ -270,6 +301,10 @@ export default function UploadPanel() {
                     {file.status === 'error' && file.error && (
                       <p className="text-xs text-[#FF6B6B] mt-2">{file.error}</p>
                     )}
+
+                    {file.status === 'success' && file.uploadedPath && (
+                      <p className="text-xs text-[#4CAF50] mt-2">Visible in viewer: {file.uploadedPath}</p>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -301,7 +336,7 @@ export default function UploadPanel() {
             <Button
               variant="outline"
               className="flex-1 border-[#444] text-[#ccc] hover:bg-[#333]"
-              onClick={() => triggerFileInput('.stl,.obj,.glb,.gltf', 'upper')}
+              onClick={() => triggerFileInput('.stl,.obj,.glb,.gltf', 'upper', true)}
             >
               <Upload className="w-4 h-4 mr-2" />
               Upper Jaw
@@ -309,7 +344,7 @@ export default function UploadPanel() {
             <Button
               variant="outline"
               className="flex-1 border-[#444] text-[#ccc] hover:bg-[#333]"
-              onClick={() => triggerFileInput('.stl,.obj,.glb,.gltf', 'lower')}
+              onClick={() => triggerFileInput('.stl,.obj,.glb,.gltf', 'lower', true)}
             >
               <Upload className="w-4 h-4 mr-2" />
               Lower Jaw

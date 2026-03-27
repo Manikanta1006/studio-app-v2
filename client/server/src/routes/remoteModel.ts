@@ -15,21 +15,31 @@ router.get('/', async (request, response) => {
       return
     }
 
-    const parsedUrl = new URL(rawUrl)
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(rawUrl)
+    } catch {
+      response.status(400).json({ success: false, error: 'Invalid URL format' })
+      return
+    }
 
     if (parsedUrl.protocol !== 'https:' || !allowedHosts.has(parsedUrl.host)) {
       response.status(400).json({ success: false, error: 'Remote model host is not allowed' })
       return
     }
 
+    console.log(`[PROXY] Fetching STL from: ${parsedUrl.toString()}`)
+
     const upstream = await fetch(parsedUrl.toString(), {
       headers: {
         Accept: 'application/octet-stream,*/*',
         'User-Agent': '3d-dental-studio-proxy/1.0',
       },
+      redirect: 'follow', // Explicitly follow redirects
     })
 
     if (!upstream.ok) {
+      console.error(`[PROXY] Remote returned ${upstream.status}: ${upstream.statusText}`)
       response.status(502).json({
         success: false,
         error: `Failed to fetch remote model: ${upstream.status} ${upstream.statusText}`,
@@ -40,37 +50,28 @@ router.get('/', async (request, response) => {
     const contentType = upstream.headers.get('content-type') ?? 'application/octet-stream'
     const contentLength = upstream.headers.get('content-length')
     const fileName = parsedUrl.pathname.split('/').pop() ?? 'remote-model.stl'
-    const body = upstream.body
 
-    if (!body) {
-      response.status(502).json({ success: false, error: 'Remote model returned an empty body' })
+    // Read entire response into buffer
+    const arrayBuffer = await upstream.arrayBuffer()
+    
+    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+      console.error('[PROXY] Remote returned empty buffer')
+      response.status(502).json({ success: false, error: 'Remote model returned empty data' })
       return
     }
+
+    console.log(`[PROXY] Successfully fetched ${arrayBuffer.byteLength} bytes`)
 
     response.status(200)
     response.setHeader('Access-Control-Allow-Origin', request.headers.origin ?? '*')
     response.setHeader('Vary', 'Origin')
-    response.setHeader('Content-Type', contentType)
-
-    if (contentLength) {
-      response.setHeader('Content-Length', contentLength)
-    }
-
+    response.setHeader('Content-Type', 'application/octet-stream')
+    response.setHeader('Content-Length', arrayBuffer.byteLength)
     response.setHeader('Cache-Control', 'public, max-age=3600')
     response.setHeader('Content-Disposition', `inline; filename="${fileName}"`)
-    const reader = body.getReader()
 
-    while (true) {
-      const { done, value } = await reader.read()
-
-      if (done) {
-        break
-      }
-
-      response.write(Buffer.from(value))
-    }
-
-    response.end()
+    // Send as binary buffer
+    response.end(Buffer.from(arrayBuffer))
   } catch (error) {
     console.error('Error proxying remote model:', error)
 

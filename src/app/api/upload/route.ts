@@ -13,6 +13,42 @@ async function ensureUploadDir() {
   return uploadDir
 }
 
+// GET - Fetch uploaded files for a case
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const caseId = searchParams.get('caseId')
+
+    if (!caseId) {
+      return NextResponse.json(
+        { success: false, error: 'caseId is required' },
+        { status: 400 }
+      )
+    }
+
+    const models = await db.jawModel.findMany({
+      where: { caseId },
+      orderBy: { uploadedAt: 'desc' },
+    })
+
+    const files = models.map((model) => ({
+      id: model.id,
+      name: path.basename(model.originalPath),
+      type: model.type,
+      glbPath: model.glbPath,
+      uploadedAt: model.uploadedAt,
+    }))
+
+    return NextResponse.json({ success: true, data: files })
+  } catch (error) {
+    console.error('Error fetching uploaded files:', error)
+    return NextResponse.json(
+      { success: false, error: 'Failed to fetch uploaded files' },
+      { status: 500 }
+    )
+  }
+}
+
 // POST - Upload dental model files
 export async function POST(request: NextRequest) {
   try {

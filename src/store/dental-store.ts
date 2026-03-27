@@ -81,6 +81,11 @@ interface DentalStore {
   setUpperJawFile: (file: File | null) => void
   setLowerJawFile: (file: File | null) => void
 
+  isUploading: boolean
+  uploadProgress: number
+  setIsUploading: (uploading: boolean) => void
+  setUploadProgress: (progress: number) => void
+
   activeTab: 'comments' | 'notes' | 'media' | 'occlusion'
   setActiveTab: (tab: 'comments' | 'notes' | 'media') => void
 }
@@ -416,6 +421,11 @@ export const useDentalStore = create<DentalStore>((set, get) => ({
   lowerJawFile: null,
   setUpperJawFile: (file) => set({ upperJawFile: file }),
   setLowerJawFile: (file) => set({ lowerJawFile: file }),
+
+  isUploading: false,
+  uploadProgress: 0,
+  setIsUploading: (uploading) => set({ isUploading: uploading }),
+  setUploadProgress: (progress) => set({ uploadProgress: progress }),
 
   activeTab: 'comments',
   setActiveTab: (tab) => set({ activeTab: tab }),

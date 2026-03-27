@@ -3,13 +3,27 @@
 import React, { Component, type ErrorInfo, type ReactNode, useState, useEffect, useMemo, useRef, memo, Suspense, useCallback } from 'react'
 import { Canvas, ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { ContactShadows, Edges, Environment, OrbitControls, useGLTF } from '@react-three/drei'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import * as THREE from 'three'
 import {
   ToothData,
   TreatmentStep,
   useDentalStore,
 } from '@/store/dental-store'
+import {
+  calculateOcclusionY,
+  analyzeOcclusionContacts,
+  getOcclusionMetrics,
+  DEFAULT_OCCLUSION_CONFIG,
+  estimateContactPoints,
+  validateOcclusion,
+  OcclusionConfig,
+} from '@/lib/occlusion'
+import { VIEW_PRESETS, FrontViewConfig } from '@/lib/frontView'
+import FrontViewCamera from './FrontViewCamera'
 type FocusArea = 'left' | 'center' | 'right'
 
 type ViewerErrorBoundaryState = {
@@ -20,6 +34,23 @@ type ViewerErrorBoundaryState = {
 interface RemoteModelSource {
   url: string
   fallbackUrl?: string
+}
+
+function parseStlGeometry(arrayBuffer: ArrayBuffer) {
+  if (arrayBuffer.byteLength < 84) {
+    throw new Error('STL file is too small to be valid')
+  }
+
+  const faceCount = new DataView(arrayBuffer).getUint32(80, true)
+  const expectedBinaryLength = 84 + faceCount * 50
+  const looksBinary = expectedBinaryLength === arrayBuffer.byteLength
+
+  if (!looksBinary) {
+    throw new Error('Invalid STL structure detected')
+  }
+
+  const loader = new STLLoader()
+  return loader.parse(arrayBuffer)
 }
 
 class ViewerErrorBoundary extends Component<{ children: ReactNode }, ViewerErrorBoundaryState> {
@@ -99,24 +130,75 @@ function prepareSequenceGeometries(geometries: THREE.BufferGeometry[]) {
 
 // No global cache to avoid memory leaks
 
+function getFileExtension(modelUrl: string) {
+  const sanitizedUrl = modelUrl.split('?')[0]
+  return sanitizedUrl.slice(sanitizedUrl.lastIndexOf('.')).toLowerCase()
+}
+
+function mergeSceneGeometries(root: THREE.Object3D) {
+  const geometries: THREE.BufferGeometry[] = []
+
+  root.updateMatrixWorld(true)
+  root.traverse((child) => {
+    if (!(child instanceof THREE.Mesh) || !child.geometry) {
+      return
+    }
+
+    const geometry = child.geometry.clone()
+    geometry.applyMatrix4(child.matrixWorld)
+    geometries.push(geometry.index ? geometry.toNonIndexed() : geometry)
+  })
+
+  if (geometries.length === 0) {
+    throw new Error('No mesh geometry found in uploaded model')
+  }
+
+  if (geometries.length === 1) {
+    return geometries[0]
+  }
+
+  const mergedGeometry = mergeGeometries(geometries, false)
+
+  if (!mergedGeometry) {
+    throw new Error('Failed to merge uploaded model geometry')
+  }
+
+  return mergedGeometry
+}
 
 async function fetchGeometryFromSource(source: RemoteModelSource): Promise<THREE.BufferGeometry> {
-  const cacheKey = source.url
-  const loader = new STLLoader()
-  const candidateUrls = source.fallbackUrl && source.fallbackUrl !== source.url
-    ? [source.fallbackUrl, source.url]
-    : [source.url]
+  // Always try proxy first for remote URLs, skip direct fetch to avoid CORS
+  const candidateUrls = source.fallbackUrl ? [source.fallbackUrl] : [source.url]
 
   let lastError: Error | null = null
 
   for (const url of candidateUrls) {
     try {
+      console.log(`[STL Loader] Attempting to fetch from: ${url}`)
       const response = await fetch(url, {
         headers: { Accept: 'application/octet-stream,*/*' },
       })
       if (!response.ok) throw new Error(`Request failed with ${response.status} ${response.statusText}`)
-      const arrayBuffer = await response.arrayBuffer()
-      const geometry = loader.parse(arrayBuffer)
+      const extension = getFileExtension(url)
+      let geometry: THREE.BufferGeometry
+
+      if (extension === '.obj') {
+        const loader = new OBJLoader()
+        const content = await response.text()
+        geometry = mergeSceneGeometries(loader.parse(content))
+      } else if (extension === '.glb' || extension === '.gltf') {
+        const loader = new GLTFLoader()
+        const arrayBuffer = await response.arrayBuffer()
+        const gltf = await new Promise<{ scene: THREE.Object3D }>((resolve, reject) => {
+          loader.parse(arrayBuffer, new URL(url, window.location.href).href, resolve, reject)
+        })
+        geometry = mergeSceneGeometries(gltf.scene)
+      } else {
+        const arrayBuffer = await response.arrayBuffer()
+        geometry = parseStlGeometry(arrayBuffer)
+      }
+
+      console.log(`[STL Loader] Successfully loaded geometry from: ${url}`)
       return geometry
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
@@ -138,6 +220,7 @@ export function useTreatmentSequenceModels(
 
   useEffect(() => {
     let disposed = false
+    setError(null)
 
     if (sources.length === 0) {
       setLoadedGeometries(current => {
@@ -212,7 +295,9 @@ export function useTreatmentSequenceModels(
               if (!disposed) setLoadedGeometries([...nextGeometries])
             } catch (err) {
               console.error(`Failed to load needed model at ${idx}:`, err)
-              if (!disposed) setError(`Failed to load model ${idx + 1}`)
+              if (!disposed) {
+                setError('One or more uploaded files could not be displayed. Broken files were skipped.')
+              }
             }
           }
         }
@@ -265,9 +350,11 @@ function GlbSequenceScene({ url, currentStep }: { url: string; currentStep: numb
 const TreatmentSequenceScene = memo(({
   preparedGeometries,
   activeTool,
+  occlusionConfig,
 }: {
   preparedGeometries: (THREE.BufferGeometry | null)[]
   activeTool: string | null
+  occlusionConfig?: OcclusionConfig
 }) => {
 
   const { currentStep, steps, selectedTooth, archVisibility } = useDentalStore()
@@ -293,43 +380,47 @@ const TreatmentSequenceScene = memo(({
   const lowerGeometry = isCurrentUpper ? partnerGeometry : primaryGeometry
   const upperGeometry = isCurrentUpper ? primaryGeometry : partnerGeometry
 
+  // Use provided config or default
+  const config = occlusionConfig || DEFAULT_OCCLUSION_CONFIG
+
+  // Calculate proper occlusion positioning
+  const occlusionPositions = useMemo(() => {
+    if (!upperGeometry || !lowerGeometry) return null
+    
+    try {
+      const { upperY, lowerY } = calculateOcclusionY(upperGeometry, lowerGeometry, config)
+      const metrics = getOcclusionMetrics(upperGeometry, lowerGeometry, upperY, lowerY)
+      const contacts = analyzeOcclusionContacts(upperGeometry, lowerGeometry, upperY, lowerY)
+      const contactPoints = estimateContactPoints(upperGeometry, lowerGeometry, upperY, lowerY)
+      
+      console.log('🦷 OCCLUSION ANALYSIS:', {
+        upperY: upperY.toFixed(3),
+        lowerY: lowerY.toFixed(3),
+        overbite: metrics.effectiveOverbite.toFixed(3),
+        quality: `${metrics.occlusionQuality.toFixed(1)}%`,
+        relationship: metrics.anteroposteriorRelationship,
+        estimatedContacts: contacts.contactCountEstimate,
+        isValid: validateOcclusion(metrics),
+      })
+      
+      return { upperY, lowerY, metrics, contactPoints }
+    } catch (error) {
+      console.error('Occlusion calculation failed:', error)
+      return null
+    }
+  }, [upperGeometry, lowerGeometry, config])
+
+  const { upperY = 0, lowerY = 0 } = occlusionPositions || {}
+
   console.log('TreatmentSequenceScene Debug:', {
     currentStep,
     isCurrentUpper,
     stepNumber,
     hasLower: !!lowerGeometry,
     hasUpper: !!upperGeometry,
-    partnerIndex
+    partnerIndex,
+    occlusionReady: !!occlusionPositions
   })
-
-
-  // Compute Y positions based on geometry bounding boxes so teeth meet at Y=0
-  const getLowerY = (geo: THREE.BufferGeometry) => {
-    if (!geo.boundingBox) geo.computeBoundingBox()
-    const bb = geo.boundingBox!
-    const y = -bb.max.y - 0.08
-    console.log('🦷 LOWER JAW →',
-      `Y position: ${y.toFixed(3)}`,
-      `| Top: ${bb.max.y.toFixed(3)}`,
-      `| Bottom: ${bb.min.y.toFixed(3)}`,
-      `| Front: ${bb.max.z.toFixed(3)}`,
-      `| Back: ${bb.min.z.toFixed(3)}`
-    )
-    return y
-  }
-  const getUpperY = (geo: THREE.BufferGeometry) => {
-    if (!geo.boundingBox) geo.computeBoundingBox()
-    const bb = geo.boundingBox!
-    const y = -bb.min.y + 5
-    console.log('🦷 UPPER JAW →',
-      `Y position: ${y.toFixed(3)}`,
-      `| Top: ${bb.max.y.toFixed(3)}`,
-      `| Bottom: ${bb.min.y.toFixed(3)}`,
-      `| Front: ${bb.max.z.toFixed(3)}`,
-      `| Back: ${bb.min.z.toFixed(3)}`
-    )
-    return y
-  }
 
   return (
     <group
@@ -337,7 +428,7 @@ const TreatmentSequenceScene = memo(({
       rotation={[0, 0, 0]}
     >
       {archVisibility.lower && lowerGeometry && (
-        <mesh geometry={lowerGeometry} position={[0, getLowerY(lowerGeometry), 0]}>
+        <mesh geometry={lowerGeometry} position={[0, lowerY, 0]}>
           <meshPhongMaterial
             color="#f8fafc"
             emissive="#1e293b"
@@ -350,7 +441,7 @@ const TreatmentSequenceScene = memo(({
       )}
 
       {archVisibility.upper && upperGeometry && (
-        <mesh geometry={upperGeometry} position={[0, getUpperY(upperGeometry), 0]}>
+        <mesh geometry={upperGeometry} position={[0, upperY, 0]}>
           <meshPhongMaterial
             color="#fcfaf8"
             emissive="#2d1e1e"
@@ -358,6 +449,21 @@ const TreatmentSequenceScene = memo(({
             shininess={35}
             specular="#ffffff"
             side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
+      
+      {/* Occlusal plane indicator */}
+      {activeTool === 'occlusal' && occlusionPositions && (
+        <mesh position={[0, config.occlusionHeight, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[20, 20, 80, 80]} />
+          <meshStandardMaterial 
+            color="#0c3f52" 
+            transparent 
+            opacity={0.15} 
+            roughness={1}
+            emissive="#0ec6d3"
+            emissiveIntensity={0.1}
           />
         </mesh>
       )}
@@ -573,8 +679,11 @@ function CameraRig({
 export default function DentalViewer(props: {
   focusArea?: FocusArea
 }) {
-  const { currentStep, steps, selectedTooth, activeTool, gridPosition, sequenceGlbUrl } = useDentalStore()
+  const { currentStep, steps, selectedTooth, activeTool, gridPosition, sequenceGlbUrl, viewPreset } = useDentalStore()
   const focusArea = props.focusArea ?? 'center'
+
+  const viewConfig = VIEW_PRESETS[viewPreset]
+  const occlusionConfig = viewConfig.occlusion
 
 
   const sequenceSteps = useMemo(
@@ -603,6 +712,7 @@ export default function DentalViewer(props: {
     () => loadedGeometries.filter((g): g is THREE.BufferGeometry => g !== null),
     [loadedGeometries]
   )
+  const loadedGeometryCount = useMemo(() => validGeometries.length, [validGeometries])
 
   const treatmentFitRadius = useMemo(() => getSequenceFitRadius(validGeometries), [validGeometries])
   const sceneScale = (sequenceGlbUrl || hasTreatmentSequence) ? 1 : activeTool === 'occlusal' ? 0.78 : 1.55
@@ -616,18 +726,14 @@ export default function DentalViewer(props: {
         <div className="pointer-events-none absolute inset-x-0 top-6 z-30 flex justify-center px-4">
           <div className="rounded-full border border-outline-variant/60 bg-card/88 px-4 py-2 text-xs font-semibold text-on-surface shadow-lg backdrop-blur-xl flex items-center gap-2">
             <div className="h-2 w-2 animate-pulse rounded-full bg-primary shadow-[0_0_8px_rgba(var(--primary),0.5)]"></div>
-            <span className="tracking-wide">Loading Treatment Models... ({loadedGeometries.length}/{sequenceSteps.length})</span>
+            <span className="tracking-wide">Loading Treatment Models... ({loadedGeometryCount}/{sequenceSteps.length})</span>
           </div>
         </div>
       ) /* Changed this condition to only show if sequenceSteps.length > 0 */}
       {hasTreatmentSequence && error && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center px-6">
-          <div className="max-w-xl rounded-2xl border border-destructive/25 bg-card/92 p-5 text-center shadow-xl backdrop-blur-xl">
-            <p className="text-sm font-black uppercase tracking-[0.2em] text-destructive">Model Load Failed</p>
-            <p className="mt-3 text-sm font-medium text-on-surface">
-              The treatment sequence could not be loaded from Cloudflare R2 or the local proxy.
-            </p>
-            <p className="mt-2 text-xs leading-5 text-outline">{error}</p>
+        <div className="pointer-events-none absolute right-4 top-20 z-30 max-w-md">
+          <div className="rounded-2xl border border-amber-400/30 bg-slate-950/88 px-4 py-3 text-sm text-amber-100 shadow-xl backdrop-blur-xl">
+            {error}
           </div>
         </div>
       )}
@@ -667,6 +773,7 @@ export default function DentalViewer(props: {
                 <TreatmentSequenceScene
                   preparedGeometries={loadedGeometries}
                   activeTool={activeTool}
+                  occlusionConfig={occlusionConfig}
                 />
               )
             )}
@@ -675,6 +782,7 @@ export default function DentalViewer(props: {
           </group>
 
           {/* <ContactShadows position={[0, -2.15, 0]} opacity={0.35} scale={14} blur={2.4} far={4.5} /> */}
+          <FrontViewCamera config={viewConfig} enableControls={true} />
           <CameraRig
             activeTool={activeTool}
             focusArea={focusArea}

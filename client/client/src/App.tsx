@@ -13,6 +13,8 @@ import {
 import ClinicalFeed from '@/components/dental/ClinicalFeed'
 import ClinicalSidebar from '@/components/dental/ClinicalSidebar'
 import DentalViewer from '@/components/dental/DentalViewer'
+import UploadedFilesPanel from '@/components/dental/UploadedFilesPanel'
+import UploadPanel from '@/components/dental/UploadPanel'
 import { Toaster } from '@/components/ui/toaster'
 import { useDentalStore } from '@/store/dental-store'
 
@@ -437,6 +439,9 @@ export default function App() {
                 onToggleLower={toggleLowerArch}
                 onFocusChange={handleFocusChange}
               />
+
+              <UploadPanel />
+              <UploadedFilesPanel />
 
               <div className="absolute bottom-4 left-4 z-20">
                 {currentTreatmentStep?.modelUrl ? (
